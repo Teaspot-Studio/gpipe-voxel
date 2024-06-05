@@ -15,23 +15,51 @@ author:             Anton Gushcha
 maintainer:         ncrashed@protonmail.com
 extra-source-files: CHANGELOG.md
 
+library
+  hs-source-dirs:      src
+  exposed-modules:
+    Data.Voxel.Combine
+    Data.Voxel.Empty
+    Data.Voxel.Grid.Unbox
+    Data.Voxel.Grid.Unbox.Internal
+    Data.Voxel.Grid.Unbox.Mutable
+    Data.Voxel.Grid.Unbox.Mutable.Internal
+    Data.Voxel.Opaque
+    Data.Voxel.Side
+  build-depends:
+      base            >= 4.5    && < 5
+    , containers      >= 0.5    && < 0.7
+    , linear          >= 1.20   && < 2
+    , primitive       >= 0.5    && < 0.10
+    , vector          >= 0.10   && < 0.14
+  default-language:    Haskell2010
+  default-extensions:
+    BangPatterns
+    DeriveGeneric
+    FlexibleInstances
+    OverloadedStrings
+    RankNTypes
+    RecordWildCards
+    ScopedTypeVariables
+    TupleSections
+
 executable gpipe-voxel-viewer
-    main-is:          Viewer.hs
-    build-depends:    
-          base ^>=4.19
-        , exception-transformers
-        , GPipe
-        , GPipe-GLFW
-    hs-source-dirs:   app
-    default-language: Haskell2010
-    default-extensions:
-      DuplicateRecordFields
-      FlexibleContexts
-      FlexibleInstances
-      MultiParamTypeClasses
-      OverloadedRecordDot 
-      RecordWildCards
-      ScopedTypeVariables
-      TypeFamilies
-      TypeOperators
-      UndecidableInstances
+  hs-source-dirs:   app
+  main-is:          Viewer.hs
+  build-depends:    
+        base ^>=4.19
+      , exception-transformers
+      , GPipe
+      , GPipe-GLFW
+  default-language: Haskell2010
+  default-extensions:
+    DuplicateRecordFields
+    FlexibleContexts
+    FlexibleInstances
+    MultiParamTypeClasses
+    OverloadedRecordDot 
+    RecordWildCards
+    ScopedTypeVariables
+    TypeFamilies
+    TypeOperators
+    UndecidableInstances
