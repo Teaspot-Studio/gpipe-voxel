@@ -1,0 +1,37 @@
+cabal-version:      3.8
+name:               gpipe-voxel
+version:            0.1.0.0
+tested-with:        GHC == 9.8.2
+-- A short (one-line) description of the package.
+-- synopsis:
+
+-- A longer description of the package.
+-- description:
+
+-- A URL where users can report bugs.
+-- bug-reports:
+license:            MIT
+author:             Anton Gushcha
+maintainer:         ncrashed@protonmail.com
+extra-source-files: CHANGELOG.md
+
+executable gpipe-voxel-viewer
+    main-is:          Viewer.hs
+    build-depends:    
+          base ^>=4.19
+        , exception-transformers
+        , GPipe
+        , GPipe-GLFW
+    hs-source-dirs:   app
+    default-language: Haskell2010
+    default-extensions:
+      DuplicateRecordFields
+      FlexibleContexts
+      FlexibleInstances
+      MultiParamTypeClasses
+      OverloadedRecordDot 
+      RecordWildCards
+      ScopedTypeVariables
+      TypeFamilies
+      TypeOperators
+      UndecidableInstances

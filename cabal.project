@@ -1,0 +1,18 @@
+packages: 
+  .
+
+source-repository-package
+  type: git
+  location: https://github.com/NCrashed/GPipe-Core.git
+  tag: a5d8abf770ccf6e14f499699ca326417054cacf3
+  subdir: GPipe-Core
+
+source-repository-package
+  type: git
+  location: https://github.com/bsl/GLFW-b.git
+  tag: 0750585b1a6ff05526f915ebef4c81c8075cef7c
+
+source-repository-package
+  type: git
+  location: https://github.com/bsl/bindings-GLFW.git
+  tag: 21b1250459d460ed22c5ecb2969374a4f45ec519
