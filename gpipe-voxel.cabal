@@ -26,6 +26,7 @@ library
     Data.Voxel.Grid.Unbox.Mutable.Internal
     Data.Voxel.Opaque
     Data.Voxel.Side
+    Graphics.GPipe.Voxel
   build-depends:
       base            >= 4.5    && < 5
     , containers      >= 0.5    && < 0.7

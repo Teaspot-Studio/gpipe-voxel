@@ -1,9 +1,11 @@
 module Main where
 
+import Prelude hiding ((<*))
 import Control.Applicative (pure)
 import Control.Monad (unless)
 import Control.Monad.Exception (MonadException)
 import Control.Monad.IO.Class (MonadIO(..))
+import Data.Foldable1 (foldl1')
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Monoid (mappend)
@@ -12,6 +14,7 @@ import Graphics.GPipe
 import Graphics.GPipe.Expr 
 
 import qualified Graphics.GPipe.Context.GLFW as GLFW
+import qualified Data.List.NonEmpty as NE 
 
 data RaycastEnvironment = RaycastEnvironment {
     primitives :: PrimitiveArray Triangles (B2 Float)
@@ -35,7 +38,7 @@ main =
     writeBuffer vertexBuffer 0 [V2 0 0, V2 1 0, V2 0 1, V2 1 1]
 
     -- Allocate textures for color and depth
-    let raycastRes :: V2 Int = 64
+    let raycastRes :: V2 Int = 128
     colorTex <- newTexture2D RGB8 raycastRes 1
     depthTex <- newTexture2D Depth16 raycastRes 1
 
@@ -62,11 +65,10 @@ main =
       invViewMat <- getUniform (const (invMatsBuffer, 1))
       eyePos <- getUniform (const (eyeBuffer, 0))
       lightPos <- getUniform (const (lightBuffer, 0))
-      let spherePos = 0
-          sphereRad = 0.2 
-          sphereDiffuse = V3 0.8 0 0
+      let aabb = Aabb (-0.2) 0.2
+          diffuse = V3 0.8 0 0
           background = 0
-          fragmentStream2 = fmap (lit lightPos . intersectSphere spherePos sphereRad sphereDiffuse background . Ray eyePos . unprojectRay invProjMat invViewMat) fragmentStream
+          fragmentStream2 = fmap (lit lightPos diffuse background . intersectAabb aabb . Ray eyePos . unprojectRay invProjMat invViewMat) fragmentStream
           fragmentStream3 = withRasterizedInfo (\a r -> (a, (rasterizedFragCoord r).z)) fragmentStream2
       drawDepth (\s -> (NoBlending, depthImage s, DepthOption Less True)) fragmentStream3 $ \ a -> do
         drawColor (\ s -> (colorImage s, pure True, False)) a
@@ -79,7 +81,7 @@ main =
           edge = (pure ClampToEdge, 0)
       samp <- newSampler2D (const (colorTex, filter, edge))
       let sampleTexture = sample2D samp SampleAuto Nothing Nothing
-          fragmentStream2 = fmap ((\(V3 r g b) -> V3 r 0 g) . sampleTexture . (\(V2 x y) -> V2 x (1.0 - y))) fragmentStream
+          fragmentStream2 = fmap ((\(V3 r g b) -> V3 r 0 g) . sampleTexture) fragmentStream
       drawWindowColor (const (win, ContextColorOption NoBlending (pure True))) fragmentStream2
 
     lightRef <- liftIO $ newIORef initLight
@@ -110,7 +112,6 @@ data Ray a = Ray {
 data IntersectResult a = IntersectResult {
   intersectSuccess :: !FBool 
 , intersectHit     :: !(V3 a)
-, intersectDiffuse :: !(V3 a)
 , intersectNormal  :: !(V3 a)
 }
 
@@ -120,38 +121,53 @@ instance ShaderType a F => IfB (IntersectResult a) where ifB = ifThenElse'
 
 -- How to encode intersection result as basic expressions of shader
 instance ShaderType a F => ShaderType (IntersectResult a) F where
-    type ShaderBaseType (IntersectResult a) = (FBool, (ShaderBaseType (V3 a), (ShaderBaseType (V3 a), ShaderBaseType (V3 a))))
-    toBase x ~(IntersectResult succ hit diffuse normal) = ShaderBaseProd (ShaderBaseBool succ) $ ShaderBaseProd (toBase x hit) $ ShaderBaseProd (toBase x diffuse) (toBase x normal)
-    fromBase x (ShaderBaseProd succ (ShaderBaseProd hit (ShaderBaseProd diffuse normal))) = IntersectResult (fromBase x succ) (fromBase x hit) (fromBase x diffuse) (fromBase x normal)
+    type ShaderBaseType (IntersectResult a) = (FBool, (ShaderBaseType (V3 a), ShaderBaseType (V3 a)))
+    toBase x ~(IntersectResult succ hit normal) = ShaderBaseProd (ShaderBaseBool succ) $ ShaderBaseProd (toBase x hit) (toBase x normal)
+    fromBase x (ShaderBaseProd succ (ShaderBaseProd hit normal)) = IntersectResult (fromBase x succ) (fromBase x hit) (fromBase x normal)
 
--- | Calculate intersection with a sphere including normal vector
-intersectSphere :: V3 FFloat -- ^ Sphere position
-  -> FFloat -- ^ Sphere radius 
-  -> V3 FFloat -- ^ Sphere color
-  -> V3 FFloat -- ^ Miss color
-  -> Ray FFloat -- ^ Ray
-  -> IntersectResult FFloat -- ^ Diffuse Color and normal vector 
-intersectSphere pos rad col missCol (Ray orig dir) = let 
-  l = pos - orig -- direction from sphere center to ray origin
-  tca = l `dot` dir -- project that direction to ray direction
-  d2 = (l `dot` l) - tca * tca -- squared distance from center to projection
-  r2 = rad * rad 
-  thc = sqrt (r2 - d2) -- distance between projection and intersection
-  t0 = tca - thc -- distance to the first point 
-  t1 = tca + thc -- distance to the second point
-  p = orig + (dir ^* t0) -- hit point
-  normal = normalized (p - pos)
-  miss = IntersectResult false 0 missCol 0 
-  hit = IntersectResult true p col normal
-  in ifB (d2 >* r2) miss $ ifB (t0 >* 0) hit miss
+-- | Axis aligned box defined by two corner points
+data Aabb a = Aabb {
+    minPoint :: !(V3 a) -- ^ Minimal coordinates point
+  , maxPoint :: !(V3 a) -- ^ Maximum coordinates point
+  }
+
+-- | Calculate intersection between AABB and a ray
+intersectAabb :: Aabb FFloat -- ^ Box
+  -> Ray FFloat -- ^ Ray 
+  -> IntersectResult FFloat 
+intersectAabb aabb@(Aabb minv maxv) (Ray origin dir) = let 
+  dirInv = recip dir 
+  t0s = (minv - origin) * dirInv 
+  t1s = (maxv - origin) * dirInv
+  (tmin, normal) = maximumWithB [
+      minWithB (t0s.x, V3 (-1) 0 0) (t1s.x, V3 1 0 0)
+    , minWithB (t0s.y, V3 0 (-1) 0) (t1s.y, V3 0 1 0)
+    , minWithB (t0s.z, V3 0 0 (-1)) (t1s.z, V3 0 0 1) ]
+  tmax = minimumB [maxB t0s.x t1s.x, maxB t0s.y t1s.y, maxB t0s.z t1s.z]
+  hitPoint = origin + dir ^* tmin
+  success = tmax >=* maxB tmin 0
+  in ifB success (IntersectResult true hitPoint normal) (IntersectResult false 0 0) 
+
+maximumWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => [(a, b)] -> (a, b) 
+maximumWithB [] = error "empty maximumB input"
+maximumWithB ax = foldl1' (\(a, ab) (b, bb) -> ifB (a <* b) (b, bb) (a, ab)) $ NE.fromList ax 
+
+minimumB :: (IfB a, OrdB a) => [a] -> a 
+minimumB [] = error "empty minimumB input"
+minimumB ax = foldl1' minB $ NE.fromList ax 
+
+minWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => (a, b) -> (a, b) -> (a, b)
+minWithB (a, ab) (b, bb) = ifB (a <* b) (a, ab) (b, bb)
 
 -- | Apply simple light to the result of intersection
 lit :: V3 FFloat -- ^ Position of light 
+  -> V3 FFloat -- ^ Diffuse color 
+  -> V3 FFloat -- ^ Color of background
   -> IntersectResult FFloat
   -> V3 FFloat 
-lit lightPos (IntersectResult succ hit diffuse normal) = ifB succ lited diffuse 
+lit lightPos diffuse back (IntersectResult succ hit normal) = ifB succ lited back 
   where 
-    litFactor = normalized (hit - lightPos) `dot` normal 
+    litFactor = normalized (lightPos - hit) `dot` normal 
     lited = litFactor *^ diffuse
 
 -- | Transform fragment position to direction in world space. Origin is camera eye.
