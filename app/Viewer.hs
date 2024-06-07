@@ -44,8 +44,9 @@ main =
     let violet = V3 255 0 255 
     let yellow = V3 255 255 0 
     let blank = V3 0 0 0
-    writeTexture3D tex 0 0 initGridSize [ red, blank, green, blank, violet, yellow, blank, blank]
-
+    -- writeTexture3D tex 0 0 initGridSize $ replicate (voxSize * voxSize * voxSize) red -- [ red, blank, green, blank, violet, yellow, blank, blank]
+    writeTexture3D tex 0 0 initGridSize $ [red, red, red, red]
+      ++ [blank, blank, blank, blank] 
     -- Screen sized quad that we use in both shaders
     vertexBuffer :: Buffer os (B2 Float) <- newBuffer 4
     writeBuffer vertexBuffer 0 [V2 0 0, V2 1 0, V2 0 1, V2 1 1]
@@ -57,7 +58,7 @@ main =
 
     -- Setup uniform buffer for eye position 
     eyeBuffer :: Buffer os (Uniform (V3 (B Float))) <- newBuffer 1 
-    let initEye = V3 (-0.6) 0.5 (0.8)
+    let initEye = V3 (-0.6) 0.5 (-0.8)
     writeBuffer eyeBuffer 0 [ initEye ]
 
     -- Setup uniform buffer for inverse projection and view matrices
@@ -141,11 +142,18 @@ intersectAabb aabb@(Aabb minv maxv) (Ray origin dir) = let
   dirInv = recip dir 
   t0s = (minv - origin) * dirInv 
   t1s = (maxv - origin) * dirInv
-  tmin = maximumB [minB t0s.x t1s.x, minB t0s.y t1s.y, minB t0s.z t1s.z]
+  (tmin, normal) = maximumWithB [
+      minWithB (t0s.x, V3 (-1) 0 0) (t1s.x, V3 1 0 0)
+    , minWithB (t0s.y, V3 0 (-1) 0) (t1s.y, V3 0 1 0)
+    , minWithB (t0s.z, V3 0 0 (-1)) (t1s.z, V3 0 0 1) ]
   tmax = minimumB [maxB t0s.x t1s.x, maxB t0s.y t1s.y, maxB t0s.z t1s.z]
   hitPoint = origin + dir ^* tmin
   success = tmax >=* maxB tmin 0
-  in ifB success (IntersectResult true hitPoint) (IntersectResult false 0) 
+  in ifB success (IntersectResult true hitPoint normal) (IntersectResult false 0 0) 
+
+maximumWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => [(a, b)] -> (a, b) 
+maximumWithB [] = error "empty maximumB input"
+maximumWithB ax = foldl1' (\(a, ab) (b, bb) -> ifB (a <* b) (b, bb) (a, ab)) $ NE.fromList ax 
 
 maximumB :: (IfB a, OrdB a) => [a] -> a 
 maximumB [] = error "empty maximumB input"
@@ -154,6 +162,9 @@ maximumB ax = foldl1' maxB $ NE.fromList ax
 minimumB :: (IfB a, OrdB a) => [a] -> a 
 minimumB [] = error "empty minimumB input"
 minimumB ax = foldl1' minB $ NE.fromList ax 
+
+minWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => (a, b) -> (a, b) -> (a, b)
+minWithB (a, ab) (b, bb) = ifB (a <* b) (a, ab) (b, bb)
 
 -- | Apply simple light to the result of intersection
 lit :: V3 FFloat -- ^ Position of light 

@@ -7,14 +7,17 @@ module Graphics.GPipe.Voxel(
   , module Graphics.GPipe
   ) where 
 
-import Linear 
-import Graphics.GPipe
+import Linear hiding (trace)
+import Graphics.GPipe hiding (trace)
 import Prelude hiding ((<*))
+
+import Debug.Trace 
 
 -- | Result of intersection algorithm
 data IntersectResult a = IntersectResult {
   intersectSuccess :: !(BooleanOf a) 
 , intersectHit     :: !(V3 a)
+, intersectNormal  :: !(V3 a)
 }
 
 -- Allows to use intersection result as result of if else statements
@@ -23,9 +26,9 @@ instance (ShaderType a F, S F Bool ~ BooleanOf a) => IfB (IntersectResult a) whe
 
 -- How to encode intersection result as basic expressions of shader
 instance (ShaderType a F, S F Bool ~ BooleanOf a) => ShaderType (IntersectResult a) F where
-    type ShaderBaseType (IntersectResult a) = (BooleanOf a, ShaderBaseType (V3 a))
-    toBase x ~(IntersectResult succ hit) = ShaderBaseProd (ShaderBaseBool succ) $ toBase x hit
-    fromBase x (ShaderBaseProd succ hit) = IntersectResult (fromBase x succ) (fromBase x hit) 
+    type ShaderBaseType (IntersectResult a) = (BooleanOf a, (ShaderBaseType (V3 a), ShaderBaseType (V3 a)))
+    toBase x ~(IntersectResult succ hit normal) = ShaderBaseProd (ShaderBaseBool succ) $ ShaderBaseProd (toBase x hit) (toBase x normal)
+    fromBase x (ShaderBaseProd succ (ShaderBaseProd hit normal)) = IntersectResult (fromBase x succ) (fromBase x hit) (fromBase x normal)
 
 -- | Axis aligned box defined by two corner points
 data Aabb a = Aabb {
@@ -72,6 +75,9 @@ instance (IfB a, BooleanOf a ~ Bool) => While a Bool where
     where 
       go a = if cond a then go $ step a else a 
 
+traceTag :: forall a . Show a => String -> a -> a
+traceTag tag = traceWith (\a -> tag ++ ": " ++ show a) 
+
 -- | Function to go through grid of voxels and select color
 traverseGrid :: (Fractional a, Real' a, IfB a, EqB a, OrdB a, IfB (TraverseResult a), While
                       (BooleanOf a, BooleanOf a, V3 a, V3 a, V3 a, V3 a, V3 a)
@@ -82,28 +88,36 @@ traverseGrid :: (Fractional a, Real' a, IfB a, EqB a, OrdB a, IfB (TraverseResul
   -> V3 a -- ^ Direction of the ray
   -> IntersectResult a -- ^ Entry point of ray
   -> TraverseResult a -- ^ Color of the voxel or background
-traverseGrid box@(Aabb minCorner maxCorner) gridSize sample dir (IntersectResult entrySuccess start) = let 
+traverseGrid box@(Aabb minCorner maxCorner) gridSize sample dir (IntersectResult entrySuccess start entryNormal) = let 
   missed = TraverseResult false 0 0 0
   boxSize = maxCorner - minCorner 
   entry = (start - minCorner) / boxSize * gridSize -- remaps ray entry point to [0 .. gridSize] range
-  step = signum dir -- Step direction by each axis
+  stepDir = signum dir -- Step direction by each axis
   dt = abs <$> recip dir -- "Time" to reach a new voxel by each axis (always non negative)
-  calcTmax (s, e, t) = let 
-    de = ifB (s <* 0) (e - floor' e) (ceiling' e - e)
-    in de / t
-  tmax0 = calcTmax <$> zip3V3 step entry dt -- Initial value of tmax
+  floorDown a = let -- Special floor that decreases by 1 if we are on higher edge
+    fa = floor' a 
+    in ifB (fa ==* a) (a - 1.0) fa 
+  ceilingUp a = let -- Special ceiling that increases by 1 if we are on lower edge 
+    ca = ceiling' a 
+    in ifB (ca ==* a) (a + 1.0) ca  
+  calcTmax (s, e, d) = let 
+    de = ifB (s <* 0) (e - floorDown e) (ceilingUp e - e)
+    in de / abs d
+  tmax0 = calcTmax <$> zip3V3 stepDir entry dir -- Initial value of tmax
   calcJustOut (s, n) = ifB (s >* 0) (n-1) 0
-  justOut = calcJustOut <$> zipV3 step gridSize -- Keep index that terminates the ray
-  normals = V3 (V3 step.x 0 0) (V3 0 step.y 0) (V3 0 0 step.z)
-  stepLoop (_, _, pos, tmax, _, _, _) = let -- The core loop of traversal
-    voxel = sample pos
-    notHit = voxel /=* 0
-    stepX = (notHit, floor' pos.x /=* justOut.x, entry + V3 step.x 0 0, tmax + V3 dt.x 0 0, pos, normals.x, voxel)
-    stepY = (notHit, floor' pos.y /=* justOut.y, entry + V3 0 step.y 0, tmax + V3 0 dt.y 0, pos, normals.y, voxel)
-    stepZ = (notHit, floor' pos.z /=* justOut.z, entry + V3 0 0 step.z, tmax + V3 0 0 dt.z, pos, normals.z, voxel)
+  justOut = calcJustOut <$> zipV3 stepDir gridSize -- Keep index that terminates the ray
+  normals = V3 (V3 (-stepDir.x) 0 0) (V3 0 (-stepDir.y) 0) (V3 0 0 (-stepDir.z))
+  stepLoop datum@(_, _, pos, tmax, _, normal, _) = let -- The core loop of traversal
+    voxelIndex = (\(p, s) -> ifB (s <* 0) (floorDown p) (floor' p)) <$> zipV3 pos stepDir
+    voxel = sample voxelIndex
+    notHit = voxel ==* 0
+    stepX = (notHit, voxelIndex.x /=* justOut.x, entry + dir ^* tmax.x, tmax + V3 dt.x 0 0, pos, ifB notHit normals.x normal, voxel)
+    stepY = (notHit, voxelIndex.y /=* justOut.y, entry + dir ^* tmax.y, tmax + V3 0 dt.y 0, pos, ifB notHit normals.y normal, voxel)
+    stepZ = (notHit, voxelIndex.z /=* justOut.z, entry + dir ^* tmax.z, tmax + V3 0 0 dt.z, pos, ifB notHit normals.z normal, voxel)
     in ifB (tmax.x <* tmax.y) (ifB (tmax.x <* tmax.z) stepX stepZ) (ifB (tmax.y <* tmax.z) stepY stepZ)
-  (notHit, isInside, _, _, hit, normal, diffuse) = whileB (\(notHit, isInside, _, _, _, _, _) -> notHit &&* isInside) stepLoop (true, true, entry, tmax0, 0, 0, 0)
-  success = TraverseResult (notB notHit &&* isInside) hit normal diffuse
+  (notHit, isInside, _, _, hitGrid, normal, diffuse) = whileB (\(notHit, isInside, _, _, _, _, _) -> notHit &&* isInside) stepLoop (true, true, entry, tmax0, 0, entryNormal, 0)
+  hitWorld = hitGrid / gridSize * boxSize + minCorner -- hit is defined in voxel grid coordinates, recalculate it back to the world coords
+  success = ifB (notB notHit) (TraverseResult true hitWorld normal diffuse) missed
   in ifB entrySuccess success missed
 
 zipV3 :: V3 a -> V3 b -> V3 (a, b)
