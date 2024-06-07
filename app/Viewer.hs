@@ -9,7 +9,7 @@ import Data.Foldable1 (foldl1')
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Monoid (mappend)
-import Data.Word (Word32)
+import Data.Word (Word8)
 import Graphics.GPipe
 import Graphics.GPipe.Expr 
 
@@ -32,6 +32,18 @@ main :: IO ()
 main =
   runContextT GLFW.defaultHandleConfig $ do
     win <- newWindow (WindowFormatColor RGB8) (GLFW.defaultWindowConfig "Viewer")
+    
+    -- Make 3D texture with voxels
+    let voxSize = 2
+    let initGridSize = V3 voxSize voxSize voxSize
+    tex <- newTexture3D RGB8 initGridSize 1
+    let red :: V3 Word8 = V3 255 0 0 
+    let green = V3 0 255 0 
+    let blue = V3 0 255 255 
+    let violet = V3 255 0 255 
+    let yellow = V3 255 255 0 
+    let blank = V3 0 0 0
+    writeTexture3D tex 0 0 initGridSize [ red, blank, green, blank, violet, yellow, blank, blank]
 
     -- Screen sized quad that we use in both shaders
     vertexBuffer :: Buffer os (B2 Float) <- newBuffer 4
@@ -44,7 +56,7 @@ main =
 
     -- Setup uniform buffer for eye position 
     eyeBuffer :: Buffer os (Uniform (V3 (B Float))) <- newBuffer 1 
-    let initEye = V3 (-0.6) 0.5 0.8
+    let initEye = V3 (-0.6) 0.5 (0.8)
     writeBuffer eyeBuffer 0 [ initEye ]
 
     -- Setup uniform buffer for inverse projection and view matrices
@@ -58,6 +70,10 @@ main =
     let initLight = V3 (-1.0) 1.2 (-1.0)
     writeBuffer lightBuffer 0 [ initLight ]
   
+    -- Setup uniform for size of the voxel grid 
+    gridSizeBuffer :: Buffer os (Uniform (V3 (B Float))) <- newBuffer 1
+    writeBuffer gridSizeBuffer 0 [ fromIntegral <$> initGridSize ]
+
     -- First shader performs raycast in low resolution into texture
     shader1 :: CompiledShader os RaycastEnvironment <- compileShader $ do
       fragmentStream <- projectFullScreen (const raycastRes) (.primitives)
@@ -65,12 +81,20 @@ main =
       invViewMat <- getUniform (const (invMatsBuffer, 1))
       eyePos <- getUniform (const (eyeBuffer, 0))
       lightPos <- getUniform (const (lightBuffer, 0))
-      let aabb = Aabb (-0.2) 0.2
+      gridSize <- getUniform (const (gridSizeBuffer, 0))
+      let filter = SamplerFilter Nearest Nearest Nearest Nothing 
+          edge = (pure ClampToEdge, 0)
+      samp <- newSampler3D (const (tex, filter, edge))
+      let sampleVoxels = sample3D samp SampleAuto Nothing Nothing
+          aabb = Aabb (-0.2) 0.2
           diffuse = V3 0.8 0 0
           background = 0
-          fragmentStream2 = fmap (lit lightPos diffuse background . intersectAabb aabb . Ray eyePos . unprojectRay invProjMat invViewMat) fragmentStream
-          fragmentStream3 = withRasterizedInfo (\a r -> (a, (rasterizedFragCoord r).z)) fragmentStream2
-      drawDepth (\s -> (NoBlending, depthImage s, DepthOption Less True)) fragmentStream3 $ \ a -> do
+          raycast = \pos -> let 
+            dir = unprojectRay invProjMat invViewMat pos
+            ray = Ray eyePos dir 
+            in lit lightPos background . traverseGrid aabb gridSize sampleVoxels dir . intersectAabb aabb $ ray
+          fragmentStream2 = withRasterizedInfo (\a r -> (a, (rasterizedFragCoord r).z)) $ fmap raycast fragmentStream
+      drawDepth (\s -> (NoBlending, depthImage s, DepthOption Less True)) fragmentStream2 $ \ a -> do
         drawColor (\ s -> (colorImage s, pure True, False)) a
 
     -- Second shader remaps lowres into full screen quad
@@ -108,11 +132,16 @@ data Ray a = Ray {
   , rayDirection :: V3 a 
   }
 
--- | Showcase how to define intermediate results 
+-- | Axis aligned box defined by two corner points
+data Aabb a = Aabb {
+    minPoint :: !(V3 a) -- ^ Minimal coordinates point
+  , maxPoint :: !(V3 a) -- ^ Maximum coordinates point
+  }
+
+-- | Result of intersection algorithm
 data IntersectResult a = IntersectResult {
   intersectSuccess :: !FBool 
 , intersectHit     :: !(V3 a)
-, intersectNormal  :: !(V3 a)
 }
 
 -- Allows to use intersection result as result of if else statements
@@ -121,15 +150,9 @@ instance ShaderType a F => IfB (IntersectResult a) where ifB = ifThenElse'
 
 -- How to encode intersection result as basic expressions of shader
 instance ShaderType a F => ShaderType (IntersectResult a) F where
-    type ShaderBaseType (IntersectResult a) = (FBool, (ShaderBaseType (V3 a), ShaderBaseType (V3 a)))
-    toBase x ~(IntersectResult succ hit normal) = ShaderBaseProd (ShaderBaseBool succ) $ ShaderBaseProd (toBase x hit) (toBase x normal)
-    fromBase x (ShaderBaseProd succ (ShaderBaseProd hit normal)) = IntersectResult (fromBase x succ) (fromBase x hit) (fromBase x normal)
-
--- | Axis aligned box defined by two corner points
-data Aabb a = Aabb {
-    minPoint :: !(V3 a) -- ^ Minimal coordinates point
-  , maxPoint :: !(V3 a) -- ^ Maximum coordinates point
-  }
+    type ShaderBaseType (IntersectResult a) = (FBool, ShaderBaseType (V3 a))
+    toBase x ~(IntersectResult succ hit) = ShaderBaseProd (ShaderBaseBool succ) $ toBase x hit
+    fromBase x (ShaderBaseProd succ hit) = IntersectResult (fromBase x succ) (fromBase x hit) 
 
 -- | Calculate intersection between AABB and a ray
 intersectAabb :: Aabb FFloat -- ^ Box
@@ -139,33 +162,88 @@ intersectAabb aabb@(Aabb minv maxv) (Ray origin dir) = let
   dirInv = recip dir 
   t0s = (minv - origin) * dirInv 
   t1s = (maxv - origin) * dirInv
-  (tmin, normal) = maximumWithB [
-      minWithB (t0s.x, V3 (-1) 0 0) (t1s.x, V3 1 0 0)
-    , minWithB (t0s.y, V3 0 (-1) 0) (t1s.y, V3 0 1 0)
-    , minWithB (t0s.z, V3 0 0 (-1)) (t1s.z, V3 0 0 1) ]
+  tmin = maximumB [minB t0s.x t1s.x, minB t0s.y t1s.y, minB t0s.z t1s.z]
   tmax = minimumB [maxB t0s.x t1s.x, maxB t0s.y t1s.y, maxB t0s.z t1s.z]
   hitPoint = origin + dir ^* tmin
   success = tmax >=* maxB tmin 0
-  in ifB success (IntersectResult true hitPoint normal) (IntersectResult false 0 0) 
+  in ifB success (IntersectResult true hitPoint) (IntersectResult false 0) 
 
-maximumWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => [(a, b)] -> (a, b) 
-maximumWithB [] = error "empty maximumB input"
-maximumWithB ax = foldl1' (\(a, ab) (b, bb) -> ifB (a <* b) (b, bb) (a, ab)) $ NE.fromList ax 
+maximumB :: (IfB a, OrdB a) => [a] -> a 
+maximumB [] = error "empty maximumB input"
+maximumB ax = foldl1' maxB $ NE.fromList ax 
 
 minimumB :: (IfB a, OrdB a) => [a] -> a 
 minimumB [] = error "empty minimumB input"
 minimumB ax = foldl1' minB $ NE.fromList ax 
 
-minWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => (a, b) -> (a, b) -> (a, b)
-minWithB (a, ab) (b, bb) = ifB (a <* b) (a, ab) (b, bb)
+-- | Result of traversal algorithm of voxel grid
+data TraverseResult a = TraverseResult {
+  traverseSuccess :: !FBool -- ^ If voxel hit or not
+, traverseHit     :: !(V3 a) -- ^ Position of hit
+, traverseNormal  :: !(V3 a) -- ^ Normal vector 
+, traverseDiffuse :: !(V3 a) -- ^ Diffuse color
+}
+
+-- Allows to use intersection result as result of if else statements
+type instance BooleanOf (TraverseResult a) = FBool
+instance ShaderType a F => IfB (TraverseResult a) where ifB = ifThenElse'
+
+-- How to encode intersection result as basic expressions of shader
+instance ShaderType a F => ShaderType (TraverseResult a) F where
+    type ShaderBaseType (TraverseResult a) = (FBool, (ShaderBaseType (V3 a), (ShaderBaseType (V3 a), ShaderBaseType (V3 a))))
+    toBase x ~(TraverseResult succ hit normal diffuse) = ShaderBaseProd (ShaderBaseBool succ) $ ShaderBaseProd (toBase x hit) $ ShaderBaseProd (toBase x normal) (toBase x diffuse)
+    fromBase x (ShaderBaseProd succ (ShaderBaseProd hit (ShaderBaseProd normal diffuse))) = TraverseResult (fromBase x succ) (fromBase x hit) (fromBase x normal) (fromBase x diffuse)
+
+type instance BooleanOf (a,b,c,d,e,f,r) = BooleanOf a
+
+instance (bool ~ BooleanOf p, bool ~ BooleanOf q, bool ~ BooleanOf r, bool ~ BooleanOf s, bool ~ BooleanOf t, bool ~ BooleanOf y, bool ~ BooleanOf u
+         ,IfB p, IfB q, IfB r, IfB s, IfB t, IfB y, IfB u) => IfB (p,q,r,s,t,y,u) where
+  ifB w (p,q,r,s,t,y,u) (p',q',r',s',t',y',u') =
+    (ifB w p p', ifB w q q', ifB w r r', ifB w s s', ifB w t t', ifB w y y', ifB w u u')
+
+-- | Function to go through grid of voxels and select color
+traverseGrid :: Aabb FFloat -- ^ Bounding box of the voxel volume
+  -> V3 FFloat -- ^ Size of the grid 
+  -> (V3 FFloat -> ColorSample F RGBFloat) -- ^ Sampler of voxels
+  -> V3 FFloat -- ^ Direction of the ray
+  -> IntersectResult FFloat -- ^ Entry point of ray
+  -> TraverseResult FFloat -- ^ Color of the voxel or background
+traverseGrid box@(Aabb minCorner maxCorner) gridSize sample dir (IntersectResult entrySuccess start) = let 
+  missed = TraverseResult false 0 0 0
+  boxSize = maxCorner - minCorner 
+  entry = (start - minCorner) / boxSize * gridSize -- remaps ray entry point to [0 .. gridSize] range
+  step = signum dir -- Step direction by each axis
+  dt = abs <$> recip dir -- "Time" to reach a new voxel by each axis (always non negative)
+  calcTmax (s, e, t) = let 
+    de = ifB (s <* 0) (e - floor' e) (ceiling' e - e)
+    in de / t
+  tmax0 = calcTmax <$> zip3V3 step entry dt -- Initial value of tmax
+  calcJustOut (s, n) = ifB (s >* 0) (n-1) 0
+  justOut = calcJustOut <$> zipV3 step gridSize -- Keep index that terminates the ray
+  normals = V3 (V3 step.x 0 0) (V3 0 step.y 0) (V3 0 0 step.z)
+  stepLoop (_, _, pos, tmax, _, _, _) = let -- The core loop of traversal
+    voxel = sample pos
+    notHit = voxel /=* 0
+    stepX = (notHit, floor' pos.x /=* justOut.x, entry + V3 step.x 0 0, tmax + V3 dt.x 0 0, pos, normals.x, voxel)
+    stepY = (notHit, floor' pos.y /=* justOut.y, entry + V3 0 step.y 0, tmax + V3 0 dt.y 0, pos, normals.y, voxel)
+    stepZ = (notHit, floor' pos.z /=* justOut.z, entry + V3 0 0 step.z, tmax + V3 0 0 dt.z, pos, normals.z, voxel)
+    in ifB (tmax.x <* tmax.y) (ifB (tmax.x <* tmax.z) stepX stepZ) (ifB (tmax.y <* tmax.z) stepY stepZ)
+  (notHit, isInside, _, _, hit, normal, diffuse) = while (\(notHit, isInside, _, _, _, _, _) -> notHit &&* isInside) stepLoop (true, true, entry, tmax0, 0, 0, 0)
+  success = TraverseResult (notB notHit &&* isInside) hit normal diffuse
+  in ifB entrySuccess success missed
+
+zipV3 :: V3 a -> V3 b -> V3 (a, b)
+zipV3 (V3 x1 y1 z1) (V3 x2 y2 z2) = V3 (x1, x2) (y1, y2) (z1, z2)
+
+zip3V3 :: V3 a -> V3 b -> V3 c -> V3 (a, b, c)
+zip3V3 (V3 x1 y1 z1) (V3 x2 y2 z2) (V3 x3 y3 z3) = V3 (x1, x2, x3) (y1, y2, y3) (z1, z2, z3)
 
 -- | Apply simple light to the result of intersection
 lit :: V3 FFloat -- ^ Position of light 
-  -> V3 FFloat -- ^ Diffuse color 
   -> V3 FFloat -- ^ Color of background
-  -> IntersectResult FFloat
+  -> TraverseResult FFloat
   -> V3 FFloat 
-lit lightPos diffuse back (IntersectResult succ hit normal) = ifB succ lited back 
+lit lightPos back (TraverseResult succ hit normal diffuse) = ifB succ diffuse back -- ifB succ lited back 
   where 
     litFactor = normalized (lightPos - hit) `dot` normal 
     lited = litFactor *^ diffuse

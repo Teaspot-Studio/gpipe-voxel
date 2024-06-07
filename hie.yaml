@@ -1,0 +1,8 @@
+cradle:
+  cabal:
+    - path: "./app"
+      component: "gpipe-voxel:exe:gpipe-voxel-viewer"
+    - path: "./src"
+      component: "gpipe-voxel:lib:gpipe-voxel"
+    - path: "./test"
+      component: "gpipe-voxel:test:gpipe-voxel-test"
