@@ -33,16 +33,27 @@ library
     , linear          >= 1.20   && < 2
     , primitive       >= 0.5    && < 0.10
     , vector          >= 0.10   && < 0.14
+    , exception-transformers
+    , GPipe
+    , GPipe-GLFW
   default-language:    Haskell2010
   default-extensions:
     BangPatterns
     DeriveGeneric
+    DuplicateRecordFields
+    FlexibleContexts
     FlexibleInstances
+    MultiParamTypeClasses
+    OverloadedRecordDot 
     OverloadedStrings
     RankNTypes
     RecordWildCards
     ScopedTypeVariables
+    StandaloneDeriving
     TupleSections
+    TypeFamilies
+    TypeOperators
+    UndecidableInstances
 
 executable gpipe-voxel-viewer
   hs-source-dirs:   app
@@ -52,6 +63,7 @@ executable gpipe-voxel-viewer
       , exception-transformers
       , GPipe
       , GPipe-GLFW
+      , gpipe-voxel
   default-language: Haskell2010
   default-extensions:
     DuplicateRecordFields
@@ -74,6 +86,7 @@ test-suite gpipe-voxel-test
   other-modules:
     Data.Voxel.Grid.Unbox.MutableTest
     Data.Voxel.Grid.UnboxTest
+    Graphics.GPipe.VoxelTest
     Test.Util
   build-depends:
       base
