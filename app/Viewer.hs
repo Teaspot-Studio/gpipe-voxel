@@ -5,7 +5,6 @@ import Control.Applicative (pure)
 import Control.Monad (unless)
 import Control.Monad.Exception (MonadException)
 import Control.Monad.IO.Class (MonadIO(..))
-import Data.Foldable1 (foldl1')
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Monoid (mappend)
@@ -15,7 +14,6 @@ import Graphics.GPipe.Expr
 import Graphics.GPipe.Voxel
 
 import qualified Graphics.GPipe.Context.GLFW as GLFW
-import qualified Data.List.NonEmpty as NE 
 
 data RaycastEnvironment = RaycastEnvironment {
     primitives :: PrimitiveArray Triangles (B2 Float)
@@ -39,30 +37,31 @@ main =
     let initGridSize = V3 voxSize voxSize voxSize
     tex <- newTexture3D RGB8 initGridSize 1
     let red :: V3 Word8 = V3 255 0 0 
-    let green = V3 0 255 0 
-    let blue = V3 0 255 255 
-    let violet = V3 255 0 255 
-    let yellow = V3 255 255 0 
-    let blank = V3 0 0 0
-    -- writeTexture3D tex 0 0 initGridSize $ replicate (voxSize * voxSize * voxSize) red -- [ red, blank, green, blank, violet, yellow, blank, blank]
-    writeTexture3D tex 0 0 initGridSize $ [red, red, red, red]
-      ++ [blank, blank, blank, blank] 
+    let green :: V3 Word8 = V3 0 255 0 
+    let blue :: V3 Word8 = V3 0 0 255 
+    let violet :: V3 Word8 = V3 255 0 255 
+    let yellow :: V3 Word8 = V3 255 255 0 
+    let blank :: V3 Word8 = V3 0 0 0
+    -- writeTexture3D tex 0 0 initGridSize [ red, blank, green, blank, violet, yellow, blank, blank]
+    writeTexture3D tex 0 0 initGridSize $ 
+      [green, blank, red, blank] ++ [blue, blank, yellow, blank]
     -- Screen sized quad that we use in both shaders
     vertexBuffer :: Buffer os (B2 Float) <- newBuffer 4
     writeBuffer vertexBuffer 0 [V2 0 0, V2 1 0, V2 0 1, V2 1 1]
 
     -- Allocate textures for color and depth
-    let raycastRes :: V2 Int = 128
+    let raycastRes :: V2 Int = 256
     colorTex <- newTexture2D RGB8 raycastRes 1
     depthTex <- newTexture2D Depth16 raycastRes 1
 
     -- Setup uniform buffer for eye position 
     eyeBuffer :: Buffer os (Uniform (V3 (B Float))) <- newBuffer 1 
-    let initEye = V3 (-0.6) 0.5 (-0.8)
+    let initEye = V3 (-1.0) 0 (-1.0)
     writeBuffer eyeBuffer 0 [ initEye ]
 
     -- Setup uniform buffer for inverse projection and view matrices
     invMatsBuffer :: Buffer os (Uniform (M44 (B Float))) <- newBuffer 2
+    -- let initProjMat = ortho (-0.5) 0.5 (-0.5) 0.5 (-1.0) 10.0 
     let initProjMat = perspective (pi/3) 1 1 100
     let initViewMat = lookAt' initEye (V3 0 0 0) (V3 0 1 0)
     writeBuffer invMatsBuffer 0 [ inv44 initProjMat, inv44 initViewMat ]
@@ -94,7 +93,9 @@ main =
           raycast pos = let 
             dir = unprojectRay invProjMat invViewMat pos
             ray = Ray eyePos dir 
-            in lit lightPos background . traverseGrid aabb gridSize sampleVoxels dir . intersectAabb aabb $ ray
+            intersected = intersectAabb aabb ray
+            traversed = traverseGrid aabb gridSize sampleVoxels dir intersected 
+            in lit lightPos background (traversed { traverseNormal = intersectNormal intersected})
           fragmentStream2 = withRasterizedInfo (\a r -> (a, (rasterizedFragCoord r).z)) $ fmap raycast fragmentStream
       drawDepth (\s -> (NoBlending, depthImage s, DepthOption Less True)) fragmentStream2 $ \ a -> do
         drawColor (\ s -> (colorImage s, pure True, False)) a
@@ -107,7 +108,7 @@ main =
           edge = (pure ClampToEdge, 0)
       samp <- newSampler2D (const (colorTex, filter, edge))
       let sampleTexture = sample2D samp SampleAuto Nothing Nothing
-          fragmentStream2 = fmap ((\(V3 r g b) -> V3 r 0 g) . sampleTexture) fragmentStream
+          fragmentStream2 = fmap sampleTexture fragmentStream
       drawWindowColor (const (win, ContextColorOption NoBlending (pure True))) fragmentStream2
 
     lightRef <- liftIO $ newIORef initLight
@@ -128,79 +129,15 @@ main =
         shader2 $ FinalEnvironment (toPrimitiveArray TriangleStrip vertexArray) winSize
       ]
 
--- | Define ray as origin and direction
-data Ray a = Ray {
-    rayOrigin :: V3 a
-  , rayDirection :: V3 a 
-  }
-
--- | Calculate intersection between AABB and a ray
-intersectAabb :: Aabb FFloat -- ^ Box
-  -> Ray FFloat -- ^ Ray 
-  -> IntersectResult FFloat 
-intersectAabb aabb@(Aabb minv maxv) (Ray origin dir) = let 
-  dirInv = recip dir 
-  t0s = (minv - origin) * dirInv 
-  t1s = (maxv - origin) * dirInv
-  (tmin, normal) = maximumWithB [
-      minWithB (t0s.x, V3 (-1) 0 0) (t1s.x, V3 1 0 0)
-    , minWithB (t0s.y, V3 0 (-1) 0) (t1s.y, V3 0 1 0)
-    , minWithB (t0s.z, V3 0 0 (-1)) (t1s.z, V3 0 0 1) ]
-  tmax = minimumB [maxB t0s.x t1s.x, maxB t0s.y t1s.y, maxB t0s.z t1s.z]
-  hitPoint = origin + dir ^* tmin
-  success = tmax >=* maxB tmin 0
-  in ifB success (IntersectResult true hitPoint normal) (IntersectResult false 0 0) 
-
-maximumWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => [(a, b)] -> (a, b) 
-maximumWithB [] = error "empty maximumB input"
-maximumWithB ax = foldl1' (\(a, ab) (b, bb) -> ifB (a <* b) (b, bb) (a, ab)) $ NE.fromList ax 
-
-maximumB :: (IfB a, OrdB a) => [a] -> a 
-maximumB [] = error "empty maximumB input"
-maximumB ax = foldl1' maxB $ NE.fromList ax 
-
-minimumB :: (IfB a, OrdB a) => [a] -> a 
-minimumB [] = error "empty minimumB input"
-minimumB ax = foldl1' minB $ NE.fromList ax 
-
-minWithB :: (BooleanOf a ~ BooleanOf b, IfB a, IfB b, OrdB a) => (a, b) -> (a, b) -> (a, b)
-minWithB (a, ab) (b, bb) = ifB (a <* b) (a, ab) (b, bb)
-
 -- | Apply simple light to the result of intersection
 lit :: V3 FFloat -- ^ Position of light 
   -> V3 FFloat -- ^ Color of background
   -> TraverseResult FFloat
   -> V3 FFloat 
-lit lightPos back (TraverseResult succ hit normal diffuse) = ifB succ diffuse back -- ifB succ lited back 
+lit lightPos back (TraverseResult succ hit normal diffuse) = ifB succ normal back -- ifB succ lited back 
   where 
     litFactor = normalized (lightPos - hit) `dot` normal 
     lited = litFactor *^ diffuse
-
--- | Transform fragment position to direction in world space. Origin is camera eye.
-unprojectRay :: M44 FFloat -- ^ Inverse projection matrix
-  -> M44 FFloat -- ^ Inverse view matrix
-  -> V2 FFloat -- ^ Fragment coordinates
-  -> V3 FFloat -- ^ World space coordinates
-unprojectRay invProjMat invViewMat (V2 x y) = let 
-  clipSpaceCoords = V4 (2.0 * x - 1.0) (2.0 * y - 1.0) (-1.0) 1.0 
-  eyeSpaceCoords = invProjMat !* clipSpaceCoords;
-  eyeSpaceDir = V4 eyeSpaceCoords.x eyeSpaceCoords.y (-1.0) 0.0 -- z = -1.0 here is always direction for camera forward, w = 0.0 means that it is now direction and not affected by offsets
-  worldSpaceDir = normalized (invViewMat !* eyeSpaceDir)
-  in worldSpaceDir.xyz
-
--- | Simplified version of 'normalize' from linear. We don't have Epsilon for the 'S F a'
-normalized :: Metric f => f FFloat -> f FFloat
-normalized v = (/ norm v) <$> v 
-
--- | Project primitive to the full size of the window without any transformations
-projectFullScreen :: (VertexFormat a ~ V2 VFloat, VertexInput a) 
-    => (s -> V2 Int) -- ^ Viewport size
-    -> (s -> PrimitiveArray p a) -- ^ Selector of primitive from shader env
-    -> Shader os s (FragmentStream (V2 FFloat))
-projectFullScreen sSize sf = do 
-    primitiveStream <- toPrimitiveStream sf
-    let mappedStream = fmap (\pos2d -> (V4 (2 * pos2d.x - 1) (2 * pos2d.y - 1) 0 1, pos2d)) primitiveStream
-    rasterize (\s -> (FrontAndBack, ViewPort (V2 0 0) (sSize s), DepthRange 0 1)) mappedStream
 
 -- | Dynamic data that passes from frame to frame
 data LoopEnv os = LoopEnv {

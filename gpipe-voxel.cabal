@@ -43,6 +43,7 @@ library
     DuplicateRecordFields
     FlexibleContexts
     FlexibleInstances
+    FunctionalDependencies
     MultiParamTypeClasses
     OverloadedRecordDot 
     OverloadedStrings
@@ -54,6 +55,7 @@ library
     TypeFamilies
     TypeOperators
     UndecidableInstances
+    UndecidableSuperClasses
 
 executable gpipe-voxel-viewer
   hs-source-dirs:   app
